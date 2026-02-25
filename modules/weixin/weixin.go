@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
 
 	"github.com/anchel/wechat-official-account-admin/lib/lru"
 	appidservice "github.com/anchel/wechat-official-account-admin/services/appid-service"
@@ -15,6 +16,31 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/samber/lo"
 )
+
+// wxImageUploader 将 API 返回的图片二进制上传为微信临时素材
+type wxImageUploader struct {
+	wxApi *wxapi.WxApi
+}
+
+func (w *wxImageUploader) UploadTempImage(ctx context.Context, data []byte) (string, error) {
+	f, err := os.CreateTemp("", "wx-api-image-*.jpg")
+	if err != nil {
+		return "", err
+	}
+	path := f.Name()
+	defer os.Remove(path)
+	if _, err = f.Write(data); err != nil {
+		return "", err
+	}
+	if err = f.Close(); err != nil {
+		return "", err
+	}
+	ret, err := w.wxApi.UploadTempMaterial(ctx, "image", path)
+	if err != nil {
+		return "", err
+	}
+	return ret.MediaId, nil
+}
 
 var lruMsgHandler *lru.CacheLRU[msghandler.MsgHandler]
 var lruWxApiClient *lru.CacheLRU[wxapi.WxApi]
@@ -107,7 +133,13 @@ func MsgHandlerFunc(rc *msghandler.ReplyCtrl, msg msghandler.Message) {
 		}
 	}
 
-	msgList, err := weixinservice.GetReplyMessages(rc.GetMsgHandler().GetMpOptions().AppId, msg)
+	ctx := rc.GetGinContext().Request.Context()
+	appid := rc.GetMsgHandler().GetMpOptions().AppId
+	var uploader weixinservice.TempImageUploader
+	if wxApi, err := GetWxApiClient(ctx, appid); err == nil && wxApi != nil {
+		uploader = &wxImageUploader{wxApi: wxApi}
+	}
+	msgList, err := weixinservice.GetReplyMessages(ctx, appid, msg, uploader)
 	if err != nil {
 		rc.GetGinContext().JSON(200, err)
 		return
